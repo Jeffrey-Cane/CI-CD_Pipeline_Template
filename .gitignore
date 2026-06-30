@@ -1,0 +1,35 @@
+# CI-generated artifacts
+/reports/
+*.sarif
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+target/
+bin/
+obj/
+vendor/
+
+# Build output
+dist/
+build/
+out/
+
+# Logs
+*.log
+logs/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

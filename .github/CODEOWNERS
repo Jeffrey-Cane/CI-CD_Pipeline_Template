@@ -1,0 +1,30 @@
+# CODEOWNERS — default reviewers for areas of the repo.
+# Replace @OWNER / team handles with real maintainers once the org is set up.
+# Order matters: the last matching pattern takes precedence.
+
+# Default owner for everything
+*                       @OWNER
+
+# Community & docs (Workstream G)
+/README.md              @OWNER
+/CONTRIBUTING.md        @OWNER
+/CODE_OF_CONDUCT.md     @OWNER
+/implementation-plan.md @OWNER
+/.github/               @OWNER
+
+# Application & container (Workstream A)
+/app/                   @OWNER
+/Dockerfile             @OWNER
+/.dockerignore          @OWNER
+
+# CI/CD workflows (Workstreams B, C, F, I)
+/.github/workflows/     @OWNER
+
+# Security scanning configs (Workstreams C, E)
+/trivy/                 @OWNER
+/zap/                   @OWNER
+
+# Compose & integration (Workstream D)
+/docker-compose.yml     @OWNER
+/tests/                 @OWNER
+/scripts/               @OWNER

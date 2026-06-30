@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discussions & design questions
+    url: https://github.com/OWNER/template-ci-cd/discussions
+    about: Ask questions, propose RFCs, and discuss design before opening large PRs.
+  - name: Contributing guide
+    url: https://github.com/OWNER/template-ci-cd/blob/main/CONTRIBUTING.md
+    about: Read how to claim work, branch, and open a pull request.
