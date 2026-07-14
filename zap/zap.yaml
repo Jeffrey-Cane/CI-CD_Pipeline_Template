@@ -1,0 +1,67 @@
+# OWASP ZAP Automation Framework plan for the DAST stage.
+# Run via the zap service in docker-compose.yml:
+#   docker compose --profile dast up --exit-code-from zap zap
+# Docs: https://www.zaproxy.org/docs/automate/automation-framework/
+
+env:
+  contexts:
+    - name: app
+      urls:
+        - http://app:8080
+      includePaths:
+        - "http://app:8080.*"
+  parameters:
+    failOnError: true
+    failOnWarning: false
+    progressToStdout: true
+
+jobs:
+  # 1) Crawl the application to discover URLs.
+  - type: spider
+    name: spider
+    parameters:
+      context: app
+      url: http://app:8080
+      maxDuration: 2
+
+  # 2) Let the passive scanner finish analysing everything the spider found.
+  - type: passiveScan-wait
+    name: passiveScan-wait
+    parameters:
+      maxDuration: 5
+
+  # 3) Actively probe for vulnerabilities (injection, XSS, etc.).
+  - type: activeScan
+    name: activeScan
+    parameters:
+      context: app
+      maxRuleDurationInMins: 1
+      maxScanDurationInMins: 5
+
+  # 4a) Human-readable HTML report -> reports/zap-report.html
+  - type: report
+    name: html-report
+    parameters:
+      template: traditional-html
+      reportDir: /zap/wrk/reports
+      reportFile: zap-report
+      reportTitle: ZAP DAST Report
+      reportDescription: Automated DAST scan produced by the CI/CD pipeline template.
+
+  # 4b) Machine-readable JSON report -> reports/zap-report.json
+  - type: report
+    name: json-report
+    parameters:
+      template: traditional-json
+      reportDir: /zap/wrk/reports
+      reportFile: zap-report
+
+  # Optional gate: uncomment to fail the scan when High-risk alerts are present.
+  # Mirror scan.zap_fail_on_high in pipeline.config.yml.
+  # - type: alertFilter
+  #   name: gate
+  # Use the outputSummary job to enforce thresholds instead:
+  - type: outputSummary
+    name: summary
+    parameters:
+      format: short

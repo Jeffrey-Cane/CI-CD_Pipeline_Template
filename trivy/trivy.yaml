@@ -1,0 +1,31 @@
+# Trivy configuration for the container scan stage.
+# Used as: trivy image --config trivy/trivy.yaml <image>
+# Docs: https://aquasecurity.github.io/trivy/latest/docs/references/configuration/config-file/
+
+# Fail the build when vulnerabilities of these severities are found.
+# Mirror the value of scan.trivy_fail_on in pipeline.config.yml.
+severity:
+  - HIGH
+  - CRITICAL
+
+# Non-zero exit code so CI fails the stage when matching severities are found.
+exit-code: 1
+
+# Only report/gate on issues that actually have a fix available. Set to false
+# to also gate on unfixed CVEs (stricter, but noisier).
+ignore-unfixed: true
+
+scan:
+  scanners:
+    - vuln
+    - secret
+    - misconfig
+
+# Show a compact table locally; CI also emits SARIF + JSON via CLI flags.
+format: table
+
+timeout: 10m
+
+db:
+  # Skip DB update failures blocking the scan in air-gapped/rate-limited CI.
+  skip-update: false

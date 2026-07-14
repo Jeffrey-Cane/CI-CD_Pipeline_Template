@@ -1,0 +1,96 @@
+name: cicd-template
+
+# All services share one internal network so tests and scans reach the app by
+# service name (e.g. http://app:8080) without exposing ports publicly.
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${IMAGE:-cicd-template-app:local}
+    environment:
+      APP_NAME: ${APP_NAME:-myapp}
+      APP_PORT: "8080"
+      DATABASE_URL: postgres://app:change-me@postgres:5432/appdb
+      REDIS_URL: redis://redis:6379
+      DEMO_USER: admin
+      DEMO_PASSWORD: password
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      - internal
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: appdb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d appdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - internal
+
+  # Integration test runner. Enable with: docker compose --profile test up
+  integration:
+    image: node:22-alpine
+    profiles:
+      - test
+    working_dir: /work
+    volumes:
+      - ./:/work
+    environment:
+      APP_BASE_URL: http://app:8080
+    depends_on:
+      app:
+        condition: service_healthy
+    command: sh -c "npm ci && npm run test:integration"
+    networks:
+      - internal
+
+  # OWASP ZAP DAST scan. Enable with: docker compose --profile dast up
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    profiles:
+      - dast
+    volumes:
+      - ./zap:/zap/wrk:rw
+      - ./reports:/zap/wrk/reports:rw
+    depends_on:
+      app:
+        condition: service_healthy
+    command: zap.sh -cmd -autorun /zap/wrk/zap.yaml
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge

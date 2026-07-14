@@ -1,0 +1,2 @@
+# This directory holds CI-generated reports (test results, Trivy, ZAP).
+# Contents are gitignored; this file keeps the directory present.

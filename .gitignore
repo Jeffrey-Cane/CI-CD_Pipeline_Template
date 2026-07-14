@@ -1,5 +1,6 @@
 # CI-generated artifacts
-/reports/
+/reports/*
+!/reports/.gitkeep
 *.sarif
 
 # Environment & secrets

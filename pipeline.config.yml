@@ -1,0 +1,49 @@
+# pipeline.config.yml
+# ---------------------------------------------------------------------------
+# The single override surface for adopters of this CI/CD template.
+# Change the values here to match your project; the workflows read from this
+# file so you should rarely need to edit anything under .github/workflows/.
+# ---------------------------------------------------------------------------
+
+app:
+  name: myapp
+  language: node # node | python | java | go | dotnet
+  port: 8080
+  health_path: /health
+
+commands:
+  install: npm ci
+  lint: npm run lint
+  format_check: npm run format:check
+  unit_test: npm test
+  integration_test: npm run test:integration
+  build: npm run build
+
+docker:
+  image: ghcr.io/OWNER/myapp
+  context: .
+  dockerfile: Dockerfile
+
+scan:
+  trivy_fail_on: HIGH,CRITICAL
+  zap_target: http://app:8080
+  zap_fail_on_high: false # DAST warns by default; set true to gate on High alerts
+
+deploy:
+  target: compose # compose | k8s | vps | cloud-vm
+  environment: staging # production | staging | preview
+
+notify:
+  channel: slack # slack | email | teams | discord
+
+# Toggle individual stages. Lean projects can disable optional stages.
+stages:
+  quality: true
+  build: true
+  container_scan: true
+  integration: true
+  dast: true
+  publish: true
+  deploy: true
+  smoke: true
+  notify: true

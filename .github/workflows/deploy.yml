@@ -1,0 +1,149 @@
+name: Deploy
+
+# Stages 8-10: deploy -> smoke test -> notify.
+# Runs after a successful CI run on main, or manually via the Actions tab.
+# The deploy step is intentionally a documented placeholder — swap the compose
+# demo for your real target (k8s, VPS, cloud VM) as configured in
+# pipeline.config.yml (deploy.target / deploy.environment).
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: false
+        default: staging
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  config:
+    # Only proceed for manual runs or successful CI runs.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      target: ${{ steps.cfg.outputs.target }}
+      environment: ${{ steps.cfg.outputs.environment }}
+      port: ${{ steps.cfg.outputs.port }}
+      health_path: ${{ steps.cfg.outputs.health_path }}
+      image: ${{ steps.cfg.outputs.image }}
+      channel: ${{ steps.cfg.outputs.channel }}
+      stage_deploy: ${{ steps.cfg.outputs.stage_deploy }}
+      stage_smoke: ${{ steps.cfg.outputs.stage_smoke }}
+      stage_notify: ${{ steps.cfg.outputs.stage_notify }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        run: |
+          set -euo pipefail
+          f=pipeline.config.yml
+          {
+            echo "target=$(yq -r '.deploy.target' "$f")"
+            echo "environment=$(yq -r '.deploy.environment' "$f")"
+            echo "port=$(yq -r '.app.port' "$f")"
+            echo "health_path=$(yq -r '.app.health_path' "$f")"
+            echo "image=ghcr.io/${GITHUB_REPOSITORY,,}"
+            echo "channel=$(yq -r '.notify.channel' "$f")"
+            echo "stage_deploy=$(yq -r '.stages.deploy' "$f")"
+            echo "stage_smoke=$(yq -r '.stages.smoke' "$f")"
+            echo "stage_notify=$(yq -r '.stages.notify' "$f")"
+          } >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Stage 8: Deploy.
+  # ---------------------------------------------------------------------------
+  deploy:
+    needs: config
+    if: needs.config.outputs.stage_deploy == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ needs.config.outputs.environment }}
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: deploy
+        name: Deploy (${{ needs.config.outputs.target }} / ${{ needs.config.outputs.environment }})
+        env:
+          IMAGE: ${{ needs.config.outputs.image }}:latest
+          APP_PORT: ${{ needs.config.outputs.port }}
+        run: |
+          set -euo pipefail
+          echo "Deploying ${IMAGE} to target=${{ needs.config.outputs.target }} env=${{ needs.config.outputs.environment }}"
+          case "${{ needs.config.outputs.target }}" in
+            compose)
+              # Demo deploy: run the published image directly on the runner.
+              docker run -d --name deployed -p "${APP_PORT}:8080" \
+                -e APP_PORT=8080 "${IMAGE}"
+              ;;
+            *)
+              echo "::warning::Deploy target '${{ needs.config.outputs.target }}' is not implemented in this template. Add your deploy steps here."
+              ;;
+          esac
+          echo "url=http://localhost:${APP_PORT}" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Stage 9: Smoke test.
+  # ---------------------------------------------------------------------------
+  smoke:
+    needs: [config, deploy]
+    if: always() && needs.config.outputs.stage_smoke == 'true' && needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Start published image
+        env:
+          IMAGE: ${{ needs.config.outputs.image }}:latest
+          APP_PORT: ${{ needs.config.outputs.port }}
+        run: docker run -d --name smoke -p "${APP_PORT}:8080" -e APP_PORT=8080 "${IMAGE}"
+      - name: Wait for health
+        run: ./scripts/wait-for-healthy.sh "http://localhost:${{ needs.config.outputs.port }}${{ needs.config.outputs.health_path }}" 60
+      - name: Smoke test
+        run: ./scripts/smoke-test.sh "http://localhost:${{ needs.config.outputs.port }}"
+
+  # ---------------------------------------------------------------------------
+  # Stage 10: Notify.
+  # ---------------------------------------------------------------------------
+  notify:
+    needs: [config, deploy, smoke]
+    if: always() && needs.config.outputs.stage_notify == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send notification
+        env:
+          WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK }}
+          CHANNEL: ${{ needs.config.outputs.channel }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+        run: |
+          set -euo pipefail
+          status="success"
+          if [ "${DEPLOY_RESULT}" != "success" ] || { [ "${SMOKE_RESULT}" != "success" ] && [ "${SMOKE_RESULT}" != "skipped" ]; }; then
+            status="failure"
+          fi
+          summary="Deploy=${DEPLOY_RESULT}, Smoke=${SMOKE_RESULT}, Commit=${GITHUB_SHA::7}, Repo=${GITHUB_REPOSITORY}, Status=${status}"
+          echo "Notification (${CHANNEL}): ${summary}"
+          if [ -z "${WEBHOOK}" ]; then
+            echo "::warning::NOTIFY_WEBHOOK secret is not set; skipping external notification."
+            exit 0
+          fi
+          curl -s -X POST -H 'content-type: application/json' \
+            -d "{\"text\":\"CI/CD ${status}: ${summary}\"}" "${WEBHOOK}" >/dev/null || \
+            echo "::warning::Notification request failed."

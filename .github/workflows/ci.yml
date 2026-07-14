@@ -1,0 +1,246 @@
+name: CI
+
+# Stages 1-7 of the pipeline: quality -> build -> container scan ->
+# integration -> DAST -> publish. Project-specific values are read from
+# pipeline.config.yml so this workflow stays generic across languages.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Load pipeline.config.yml once and expose values as outputs for other jobs.
+  # ---------------------------------------------------------------------------
+  config:
+    runs-on: ubuntu-latest
+    outputs:
+      app_name: ${{ steps.cfg.outputs.app_name }}
+      port: ${{ steps.cfg.outputs.port }}
+      health_path: ${{ steps.cfg.outputs.health_path }}
+      install: ${{ steps.cfg.outputs.install }}
+      lint: ${{ steps.cfg.outputs.lint }}
+      format_check: ${{ steps.cfg.outputs.format_check }}
+      unit_test: ${{ steps.cfg.outputs.unit_test }}
+      build: ${{ steps.cfg.outputs.build }}
+      dockerfile: ${{ steps.cfg.outputs.dockerfile }}
+      context: ${{ steps.cfg.outputs.context }}
+      trivy_fail_on: ${{ steps.cfg.outputs.trivy_fail_on }}
+      image: ${{ steps.cfg.outputs.image }}
+      stage_quality: ${{ steps.cfg.outputs.stage_quality }}
+      stage_build: ${{ steps.cfg.outputs.stage_build }}
+      stage_container_scan: ${{ steps.cfg.outputs.stage_container_scan }}
+      stage_integration: ${{ steps.cfg.outputs.stage_integration }}
+      stage_dast: ${{ steps.cfg.outputs.stage_dast }}
+      stage_publish: ${{ steps.cfg.outputs.stage_publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        name: Parse pipeline.config.yml
+        run: |
+          set -euo pipefail
+          f=pipeline.config.yml
+          {
+            echo "app_name=$(yq -r '.app.name' "$f")"
+            echo "port=$(yq -r '.app.port' "$f")"
+            echo "health_path=$(yq -r '.app.health_path' "$f")"
+            echo "install=$(yq -r '.commands.install' "$f")"
+            echo "lint=$(yq -r '.commands.lint' "$f")"
+            echo "format_check=$(yq -r '.commands.format_check' "$f")"
+            echo "unit_test=$(yq -r '.commands.unit_test' "$f")"
+            echo "build=$(yq -r '.commands.build' "$f")"
+            echo "dockerfile=$(yq -r '.docker.dockerfile' "$f")"
+            echo "context=$(yq -r '.docker.context' "$f")"
+            echo "trivy_fail_on=$(yq -r '.scan.trivy_fail_on' "$f")"
+            echo "image=ghcr.io/${GITHUB_REPOSITORY,,}"
+            echo "stage_quality=$(yq -r '.stages.quality' "$f")"
+            echo "stage_build=$(yq -r '.stages.build' "$f")"
+            echo "stage_container_scan=$(yq -r '.stages.container_scan' "$f")"
+            echo "stage_integration=$(yq -r '.stages.integration' "$f")"
+            echo "stage_dast=$(yq -r '.stages.dast' "$f")"
+            echo "stage_publish=$(yq -r '.stages.publish' "$f")"
+          } >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Stage 1: Code quality — lint, format check, unit tests.
+  # ---------------------------------------------------------------------------
+  quality:
+    needs: config
+    if: needs.config.outputs.stage_quality == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: ${{ needs.config.outputs.install }}
+      - name: Lint
+        run: ${{ needs.config.outputs.lint }}
+      - name: Format check
+        run: ${{ needs.config.outputs.format_check }}
+      - name: Unit tests
+        run: ${{ needs.config.outputs.unit_test }}
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report
+          path: reports/
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Stages 2-3: Build the image and scan it with Trivy.
+  # ---------------------------------------------------------------------------
+  build-scan:
+    needs: [config, quality]
+    if: always() && needs.config.outputs.stage_build == 'true' && needs.quality.result != 'failure' && needs.quality.result != 'cancelled'
+    runs-on: ubuntu-latest
+    env:
+      LOCAL_IMAGE: cicd-template-app:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (load locally)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ needs.config.outputs.context }}
+          file: ${{ needs.config.outputs.dockerfile }}
+          load: true
+          tags: ${{ env.LOCAL_IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy scan (SARIF report, non-blocking)
+        if: needs.config.outputs.stage_container_scan == 'true'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: "0"
+
+      - name: Upload Trivy SARIF to code scanning
+        if: needs.config.outputs.stage_container_scan == 'true'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+        continue-on-error: true
+
+      - name: Trivy scan (gate on ${{ needs.config.outputs.trivy_fail_on }})
+        if: needs.config.outputs.stage_container_scan == 'true'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          trivy-config: trivy/trivy.yaml
+
+      - name: Upload Trivy SARIF artifact
+        if: always() && needs.config.outputs.stage_container_scan == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: trivy-results.sarif
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Stages 4-5: Bring up the full stack and run integration tests.
+  # ---------------------------------------------------------------------------
+  integration:
+    needs: [config, build-scan]
+    if: always() && needs.config.outputs.stage_integration == 'true' && needs.build-scan.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start app + postgres + redis
+        run: docker compose up -d --build app
+      - name: Wait for app to be healthy
+        run: ./scripts/wait-for-healthy.sh "http://localhost:${{ needs.config.outputs.port }}${{ needs.config.outputs.health_path }}" 120
+      - name: Run integration tests
+        run: docker compose run --rm integration
+      - name: Dump app logs on failure
+        if: failure()
+        run: docker compose logs
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+      - name: Upload integration report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-report
+          path: reports/
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Stage 6: DAST scan with OWASP ZAP (warns by default).
+  # ---------------------------------------------------------------------------
+  dast:
+    needs: [config, build-scan]
+    if: always() && needs.config.outputs.stage_dast == 'true' && needs.build-scan.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start app + postgres + redis
+        run: docker compose up -d --build app
+      - name: Wait for app to be healthy
+        run: ./scripts/wait-for-healthy.sh "http://localhost:${{ needs.config.outputs.port }}${{ needs.config.outputs.health_path }}" 120
+      - name: Run ZAP DAST scan
+        run: docker compose --profile dast run --rm zap
+        continue-on-error: true
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+      - name: Upload ZAP reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-dast-report
+          path: reports/zap-report.*
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Stage 7: Publish the image to GHCR (only on main, once CI is green).
+  # ---------------------------------------------------------------------------
+  publish:
+    needs: [config, build-scan, integration, dast]
+    if: >-
+      always() &&
+      needs.config.outputs.stage_publish == 'true' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.build-scan.result == 'success' &&
+      needs.integration.result == 'success' &&
+      (needs.dast.result == 'success' || needs.dast.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ needs.config.outputs.context }}
+          file: ${{ needs.config.outputs.dockerfile }}
+          push: true
+          tags: |
+            ${{ needs.config.outputs.image }}:${{ github.sha }}
+            ${{ needs.config.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
