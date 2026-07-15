@@ -155,6 +155,25 @@ jobs:
           if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
+  # mini stage: check if image was built successfully before proceeding to integration/DAST/publish/deploy.
+  # ---------------------------------------------------------------------------        
+      - name: Debug - Check image exists
+        run: |
+          docker images | grep cicd-template-app || echo "Image not found!"
+          docker image inspect ${{ env.LOCAL_IMAGE }} || echo "Inspect failed!"
+
+      - name: Debug - Check config outputs
+        run: |
+          echo "context: ${{ needs.config.outputs.context }}"
+          echo "dockerfile: ${{ needs.config.outputs.dockerfile }}"
+          echo "trivy_fail_on: ${{ needs.config.outputs.trivy_fail_on }}"
+          echo "stage_container_scan: ${{ needs.config.outputs.stage_container_scan }}"
+
+      - name: Debug - Check trivy config exists
+        run: |
+          ls -la trivy/trivy.yaml || echo "Config file missing!"
+          cat trivy/trivy.yaml || echo "Cannot read config!"
+  # ---------------------------------------------------------------------------
   # Stages 4-5: Bring up the full stack and run integration tests.
   # ---------------------------------------------------------------------------
   integration:
